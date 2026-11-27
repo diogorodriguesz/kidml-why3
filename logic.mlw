@@ -1,0 +1,697 @@
+(* KidML - 3.1.1 Core Language *)
+
+(* list notation shared by all modules *)
+module Notation
+
+  use list.List
+
+  let function (::) (a: 'a) (l: list 'a) : list 'a = Cons a l
+  meta rewrite_def function (::)
+
+end
+
+(* syntax *)
+module Syntax
+
+  use int.Int
+  use string.String
+  use list.List
+  use list.Mem
+  use Notation
+
+  type ident = string
+
+  type ghost_status = Reg | Ghost
+
+  type const = CInt int | CBool bool | CUnit
+
+  type value = VConst const
+
+  type atom = AVar ident | AVal value
+
+  type expr =
+    | EAtoms (list atom)
+    | ELet   (list (ghost_status, ident)) expr expr
+    | EGhost expr
+    | EIf    atom expr expr
+
+  (* let reg x = 42 in ghost x *)
+  constant ex1 : expr =
+    ELet ((Reg, "x") :: Nil)
+         (EAtoms (AVal (VConst (CInt 42)) :: Nil))
+         (EGhost (EAtoms (AVar "x" :: Nil)))
+         
+  function binder_names (bs : list (ghost_status, ident)) : list ident =
+    match bs with
+    | Nil           -> Nil
+    | Cons (_, x) r -> Cons x (binder_names r)
+    end
+
+  predicate distinct (l: list ident) =
+    match l with
+    | Nil      -> true
+    | Cons x r -> not (mem x r) /\ distinct r
+    end
+
+  function values_atoms (vs : list value) : list atom =
+    match vs with
+    | Nil      -> Nil
+    | Cons v r -> Cons (AVal v) (values_atoms r)
+    end
+    
+end
+
+(* result: outcomes of evaluation *)
+module Result
+  
+  use list.List
+  use Syntax
+
+  type exn = ident
+
+  type result =
+    | RVals (list value) 
+    | RRaise exn (list value) 
+    | RAbsurd 
+    | RDiv 
+    | RErr
+    
+  predicate abort (r : result) =
+    match r with
+    | RVals _    -> false
+    | RRaise _ _ -> true
+    | RAbsurd    -> true
+    | RDiv       -> true
+    | RErr       -> true
+    end
+
+end
+
+(* masks: order relation (Fig. 3.1) and union (Fig. 3.2) *)
+module Masks
+
+  use list.List
+  use Syntax
+
+  type mask = list ghost_status
+
+  predicate le_status (b1 b2 : ghost_status) =
+    b1 = Reg \/ b2 = Ghost
+
+  predicate le_mask (m1 m2 : mask) =
+    match m1, m2 with
+    | Nil, Nil               -> true
+    | Cons b1 r1, Cons b2 r2 -> le_status b1 b2 /\ le_mask r1 r2
+    | _                      -> false
+    end
+
+  function join_status (b1 b2 : ghost_status) : ghost_status =
+    match b1 with
+    | Ghost -> Ghost
+    | Reg   -> b2
+    end
+
+  function mask_union (m1 m2 : mask) : mask =
+    match m1, m2 with
+    | Nil, Nil               -> Nil
+    | Cons b1 r1, Cons b2 r2 -> Cons (join_status b1 b2) (mask_union r1 r2)
+    | _                      -> Nil  (* lengths differ: unused junk value *)
+    end
+    
+  (* (TLet) helper *)
+  function binder_mask (bs : list (ghost_status, ident)) : mask =
+    match bs with
+    | Nil           -> Nil
+    | Cons (s, _) r -> Cons s (binder_mask r)
+    end
+
+end
+
+(* types, typing contexts, and operations on types (Fig. 3.3) *)
+module Types
+
+  use int.Int
+  use list.List
+  use map.Map
+  use map.Const
+  use option.Option
+  use Syntax
+  use Masks
+
+  type tvar = int
+
+  type tcons = TInt | TBool | TUnit
+
+  type ty = TVar tvar | TApp tcons (list ty)
+
+  type aty = (ghost_status, ty)
+
+  type pi = list aty
+
+  type ctx = map ident (option aty)
+
+  constant empty_ctx : ctx = const None
+
+  (* oracle to retrieve the type of a constant c *)
+  function typeof (c : const) : ty =
+    match c with
+    | CInt  _ -> TApp TInt Nil
+    | CBool _ -> TApp TBool Nil
+    | CUnit   -> TApp TUnit Nil
+    end
+
+  (* extension of the typing context *)
+  function extend (c : ctx) (bs : list (ghost_status, ident)) (ts : list ty) : ctx =
+    match bs, ts with
+    | Cons (s, x) bs1, Cons t ts1 -> extend c[x <- Some (s, t)] bs1 ts1
+    | _                           -> c
+    end
+
+  (* projections of pi *)
+  function mask_of (p : pi) : mask =
+    match p with
+    | Nil           -> Nil
+    | Cons (s, _) r -> Cons s (mask_of r)
+    end
+
+  function types_of (p : pi) : list ty =
+    match p with
+    | Nil           -> Nil
+    | Cons (_, t) r -> Cons t (types_of r)
+    end
+    
+  (* projection of value *)
+  function typeof_value (v : value) : ty =
+    match v with 
+      VConst k -> typeof k 
+    end
+  
+  (* same types, and q is at most as ghost as p *)
+  predicate le_pi (q p : pi) =
+    types_of q = types_of p /\ le_mask (mask_of q) (mask_of p)
+
+  (* type ghostification *)
+  function ghostification (p : pi) : pi =
+    match p with
+    | Nil           -> Nil
+    | Cons (_, t) r -> Cons (Ghost, t) (ghostification r)
+    end
+
+  (* type union *)
+  function type_union (p1 p2 : pi) : option pi =
+    match p1, p2 with
+    | Nil, Nil -> Some Nil
+    | Cons (b1, t1) r1, Cons (b2, t2) r2 ->
+      if t1 = t2 then
+        match type_union r1 r2 with
+        | Some r -> Some (Cons (join_status b1 b2, t1) r)
+        | None   -> None
+        end
+      else None
+    | _ -> None
+    end
+
+end
+
+(* typing: type system of KidML *)
+module Typing
+
+  use list.List
+  use list.Mem
+  use map.Map
+  use option.Option
+  use Notation
+  use Syntax
+  use Masks
+  use Types
+
+  (* (TConst) and (TVar): typing a single atom *)   
+  inductive typing_atom (c : ctx) (a : atom) (t : aty) =
+    | t_const : forall c k t.
+        typeof k = t  -> typing_atom c (AVal (VConst k)) (Reg, t)
+    | t_var   : forall c x t.
+        c[x] = Some t -> typing_atom c (AVar x) t
+
+  (* (TABar) premise: typing a sequence of atoms, one atom at a time *)
+  predicate typing_atoms (c : ctx) (l : list atom) (p : pi) =
+    match l, p with
+    | Nil, Nil           -> true
+    | Cons a r, Cons t q -> typing_atom c a t /\ typing_atoms c r q
+    | _                  -> false    
+    end
+
+  (* typing judgment *)
+  inductive typing (c : ctx) (e : expr) (p : pi) =
+    | t_abar     : forall c l p.
+        typing_atoms c l p -> typing c (EAtoms l) p
+    | t_ghost    : forall c e p.
+        typing c e p -> typing c (EGhost e) (ghostification p)
+    | t_if       : forall c a e1 e2 p1 p2 p.
+        typing_atom c a (Reg, TApp TBool Nil) ->
+        typing c e1 p1 ->
+        typing c e2 p2 ->
+        type_union p1 p2 = Some p ->
+        typing c (EIf a e1 e2) p
+    | t_if_ghost : forall c a e1 e2 p1 p2 p.
+        typing_atom c a (Ghost, TApp TBool Nil) ->
+        typing c e1 p1 ->
+        typing c e2 p2 ->
+        type_union p1 p2 = Some p ->
+        typing c (EIf a e1 e2) (ghostification p)
+    | t_let      : forall c bs e1 e2 p1 p2.
+        typing c e1 p1 ->
+        le_mask (mask_of p1) (binder_mask bs) ->
+        (* formalization on paper doesn't need this much detail *)
+        distinct (binder_names bs) ->
+        typing (extend c bs (types_of p1)) e2 p2 ->
+        typing c (ELet bs e1 e2) p2
+  
+end
+
+(* subst: substitution of values for variables *)
+module Subst
+
+  use list.List
+  use list.Mem
+  use Notation
+  use Syntax
+  
+  (* a[x -> v] *)
+  function subst_atom (x : ident) (v : value) (a : atom) : atom =
+    match a with
+    | AVar y -> if y = x then AVal v else a
+    | AVal _ -> a 
+    end
+  
+  (* abar[x -> v] *)
+  function subst_atoms (x : ident) (v : value) (l : list atom) : list atom =
+    match l with 
+    | Nil      -> Nil
+    | Cons a r -> Cons (subst_atom x v a) (subst_atoms x v r)
+    end
+    
+  (* e[x -> v] *)
+  function subst (x : ident) (v : value) (e : expr) : expr =
+    match e with
+    | EAtoms l      -> EAtoms (subst_atoms x v l)
+    | ELet bs e1 e2 -> ELet bs (subst x v e1) 
+                               (if mem x (binder_names bs) then e2 else subst x v e2)
+    | EGhost e1     -> EGhost (subst x v e1)
+    | EIf a e1 e2   -> EIf (subst_atom x v a) (subst x v e1) (subst x v e2)
+    end 
+    
+  (* e[xbar -> vbar]: one variable at a time *)
+  function subst_all (xs : list ident) (vs : list value) (e : expr) : expr =
+    match xs, vs with
+    | Cons x xs1, Cons v vs1 -> subst_all xs1 vs1 (subst x v e)
+    | _                      -> e
+    end
+  
+  (* x[x -> 42] = 42 *)
+  goal subst_var:
+    subst "x" (VConst (CInt 42)) (EAtoms (AVar "x" :: Nil))
+      = EAtoms (AVal (VConst (CInt 42)) :: Nil)
+      
+  (* shadowing: in let x = x in x, only the first x is free *)
+  goal subst_shadow:
+    subst "x" (VConst (CInt 42))
+      (ELet ((Reg, "x") :: Nil) (EAtoms (AVar "x" :: Nil)) (EAtoms (AVar "x" :: Nil)))
+    = ELet ((Reg, "x") :: Nil) (EAtoms (AVal (VConst (CInt 42)) :: Nil)) (EAtoms (AVar "x" :: Nil)) 
+     
+end
+
+(* semantics: big-step operational semantics *)
+module Semantics
+
+  use list.List
+  use list.Length
+  use option.Option
+  use Syntax
+  use Subst
+  use Result
+  
+  (* the atoms are all values, i.e. l is some sequence vbar *)
+  predicate all_values (l : list atom) =
+    match l with
+    | Nil             -> true
+    | Cons (AVal _) r -> all_values r
+    | Cons (AVar _) _ -> false
+    end
+  
+  (* progress judgment *)    
+  predicate progress (e : expr) =
+    match e with
+    | EAtoms l   -> all_values l
+    | EGhost _   -> true
+    | ELet _ _ _ -> true
+    | EIf a _ _  -> a = AVal (VConst (CBool true)) 
+                 \/ a = AVal (VConst (CBool false))
+    end
+    
+  (* evaluation judgment *)  
+  inductive eval (e : expr) (r : result) =
+    | eval_vbar      : forall l vs.
+        l = values_atoms vs -> eval (EAtoms l) (RVals vs)
+    | eval_ghost     : forall e vs.
+        eval e vs  -> eval (EGhost e) vs
+    | eval_if_true   : forall e1 e2 vs.
+        eval e1 vs -> eval (EIf (AVal (VConst (CBool true))) e1 e2) vs
+    | eval_if_false  : forall e1 e2 vs.
+        eval e2 vs -> eval (EIf (AVal (VConst (CBool false))) e1 e2) vs 
+    | eval_let       : forall bs e1 e2 vs1 vs.
+        eval e1 (RVals vs1) ->
+        length bs = length vs1 ->
+        distinct (binder_names bs) ->
+        eval (subst_all (binder_names bs) vs1 e2) vs ->
+        eval (ELet bs e1 e2) vs
+    | eval_let_abort : forall bs e1 e2 r.
+        eval e1 r ->
+        abort r ->
+        eval (ELet bs e1 e2) r
+    | eval_err       : forall e.
+        not (progress e) -> eval e RErr
+ 
+end
+
+(* SubstLemma: Lemma 3.2.6 (Substitution) *)
+module SubstLemma
+
+  use int.Int
+  use list.List
+  use list.Length
+  use list.Mem
+  use map.Map
+  use option.Option
+  use Syntax
+  use Masks
+  use Types
+  use Typing
+  use Subst
+  
+  (* abar[x -> v] *)
+  lemma subst_atom_typing:
+    forall c x s t v a b ty.
+      typing_atom c[x <- Some (s, t)] a (b, ty) ->
+      typing_atom c (AVal v) (Reg, t) ->
+      typing_atom c (subst_atom x v a) ((if a = AVar x then Reg else b), ty)
+
+  (* abar[x -> v] *)
+  let rec lemma subst_atoms_typing (c : ctx) (x : ident) (s : ghost_status) (t : ty) 
+                                   (v : value) (l : list atom) (p : pi)
+    requires { typing_atoms c[x <- Some (s, t)] l p }
+    requires { typing_atom c (AVal v) (Reg, t) }
+    ensures  { exists q. typing_atoms c (subst_atoms x v l) q /\ le_pi q p }
+    variant  { l }
+  = match l, p with
+    | Cons _ r, Cons (_, _) p1 -> subst_atoms_typing c x s t v r p1
+    | _ -> ()
+    end  
+  
+  (* ghostification is monotone *)
+  let rec lemma le_pi_ghost (q p : pi)
+    requires { le_pi q p }
+    ensures  { le_pi (ghostification q) (ghostification p) }
+    variant  { p }
+  = match q, p with
+    | Cons _ r1, Cons _ r2 -> le_pi_ghost r1 r2
+    | _ -> ()
+    end
+    
+  (* anything below p is also below the ghostification of p *)
+  let rec lemma le_pi_ghostification (q p : pi)
+    requires { le_pi q p }
+    ensures  { le_pi q (ghostification p) }
+    variant  { q }
+  = match q, p with
+    | Cons (_, _) r1, Cons (_, _) r2 -> le_pi_ghostification r1 r2
+    | _ -> ()
+    end
+    
+  (* type_union is monotone *)
+  let rec lemma le_type_union (q1 q2 p1 p2 p3 : pi)
+    requires { le_pi q1 p1 } 
+    requires { le_pi q2 p2 }
+    requires { type_union p1 p2 = Some p3 }
+    ensures  { match type_union q1 q2 with
+               | Some q3 -> le_pi q3 p3
+               | None    -> false
+               end }
+    variant  { p1 }
+  = match q1, q2, p1, p2, p3 with 
+    | Cons _ r1, Cons _ r2, Cons _ s1, Cons _ s2, Cons _ s3 -> 
+        le_type_union r1 r2 s1 s2 s3
+    | _ -> ()
+    end
+   
+  (* mask relation is reflexive *)
+  let rec lemma le_mask_refl (m : mask)
+    ensures { le_mask m m }
+    variant { m }
+  = match m with 
+    | Cons _ r -> le_mask_refl r 
+    | _ -> ()
+    end
+   
+  (* mask relation is transitive *)
+  let rec lemma le_mask_trans (m1 m2 m3 : mask) 
+    requires { le_mask m1 m2 }
+    requires { le_mask m2 m3 }
+    ensures  { le_mask m1 m3 }
+    variant  { m1 }
+  = match m1, m2, m3 with
+    | Cons _ r1, Cons _ r2, Cons _ r3 -> le_mask_trans r1 r2 r3
+    | _ -> ()
+    end
+    
+  (* if the binders fit the type p, there is one binder per component of p *)
+  let rec lemma binders_types_length (p : pi) (bs : list (ghost_status, ident))
+    requires { le_mask (mask_of p) (binder_mask bs) }
+    ensures  { length bs = length (types_of p) }
+    variant  { p }
+  = match p, bs with
+    | Cons (_, _) r, Cons (_, _) bs1 -> binders_types_length r bs1
+    | _ -> ()
+    end
+  
+   (* if x is one of the binders, its old binding is hidden by the new one *)
+  let rec lemma extend_shadow (c : ctx) (x : ident) (old_bs : option aty) 
+                              (bs : list (ghost_status, ident)) (ts : list ty)
+    requires { mem x (binder_names bs) } 
+    requires { length bs = length ts } (* every binder gets a type *)
+    ensures  { extend c[x <- old_bs] bs ts = extend c bs ts }
+    variant  { bs }
+  = match bs, ts with
+    | Cons (s, y) bs1, Cons t ts1 ->
+        if pure { x = y } then () else extend_shadow c[y <- Some (s, t)] x old_bs bs1 ts1
+    | _ -> ()
+    end
+    
+  (* if x is not one of the binders, x can be added before or after them *)
+  let rec lemma extend_commute (c : ctx) (x : ident) (old_bs : option aty)
+                               (bs : list (ghost_status, ident)) (ts : list ty)
+    requires { not (mem x (binder_names bs)) }
+    ensures  { extend c[x <- old_bs] bs ts = (extend c bs ts)[x <- old_bs] }
+    variant  { bs }
+  = match bs, ts with
+    | Cons (s, y) bs1, Cons t ts1 -> extend_commute c[y <- Some (s, t)] x old_bs bs1 ts1
+    | _ -> ()
+    end
+    
+  (* e[x -> v] *)
+  let rec lemma subst_typing (x : ident) (s : ghost_status) (t : ty) (v : value) (e : expr)
+    ensures { forall c p.
+                typing c[x <- Some (s, t)] e p ->
+                typing_atom c (AVal v) (Reg, t) ->
+                exists q. typing c (subst x v e) q /\ le_pi q p }
+    variant { e }
+  = match e with
+    | EAtoms _     -> ()
+    | EGhost e1    -> subst_typing x s t v e1
+    | EIf _ e1 e2  -> subst_typing x s t v e1; subst_typing x s t v e2
+    | ELet _ e1 e2 -> subst_typing x s t v e1; subst_typing x s t v e2
+    end
+  
+
+  (* e[xbar -> vbar]: one variable at a time *)
+  let rec lemma subst_all_typing (c : ctx) (bs : list (ghost_status, ident))
+                                 (vs : list value) (q : pi) (e : expr)
+    requires { distinct (binder_names bs) }
+    requires { typing_atoms c (values_atoms vs) q }
+    ensures  { forall p. typing (extend c bs (types_of q)) e p ->
+               exists p'. typing c (subst_all (binder_names bs) vs e) p' /\ le_pi p' p }
+    variant  { bs }
+  = match bs, vs, q with
+    | Cons (b, x) bs1, Cons v vs1, Cons (_, t) q1 ->
+        subst_typing x b t v e;
+        subst_all_typing c bs1 vs1 q1 (subst x v e)
+    | _ -> ()
+    end
+
+end 
+
+(* Progress: Lemma 3.2.5 (Progress) *)
+module Progress
+
+  use list.List
+  use map.Map
+  use map.Const
+  use option.Option
+  use Syntax
+  use Types
+  use Typing
+  use Semantics
+  
+  (* in the empty context, a well-typed atom is a value *)
+  lemma typing_atom_empty: 
+    forall a t.
+      typing_atom empty_ctx a t -> exists v. a = AVal v
+    
+  (* in the empty context, a well-typed sequence of atoms is a sequence of values *)
+  let rec lemma typing_atoms_empty (l : list atom) (p : pi)
+    requires { typing_atoms empty_ctx l p }
+    ensures  { all_values l }
+    variant  { l }
+  = match l, p with
+    | Cons _ r, Cons _ p1 -> typing_atoms_empty r p1
+    | _ -> ()
+    end
+    
+  (* in the empty context, a well-typed boolean atom is the constant true or false *)
+  lemma typing_bool_empty: 
+    forall a b.
+      typing_atom empty_ctx a (b, TApp TBool Nil) ->
+      a = AVal (VConst (CBool true)) \/ a = AVal (VConst (CBool false))
+  
+  (* Lemma 3.2.5 (Progress) *)
+  lemma typing_progress: 
+    forall e p.
+      typing empty_ctx e p -> progress e 
+
+end
+
+(* EvalNotDiv: Lemma 3.2.1 *)
+module EvalNotDiv
+
+  use list.List
+  use Syntax
+  use Subst
+  use Result
+  use Semantics
+  
+  (* Lemma 3.2.1: evaluation never produces div *)
+  lemma eval_not_div: 
+    forall e r.
+      eval e r -> r <> RDiv 
+
+end
+
+(* Lemma 3.2.8 (Preservation) *)
+module Preservation
+
+  use list.List
+  use map.Map
+  use map.Const
+  use option.Option
+  use Syntax
+  use Types
+  use Typing
+  use Result
+  use Semantics
+  use SubstLemma
+  use Progress
+  
+  (* a result is well-typed *)  
+  predicate typing_result (r : result) (p : pi) =
+    match r with
+    | RVals vs -> typing_atoms empty_ctx (values_atoms vs) p
+    | RErr     -> false
+    | _        -> true
+    end
+
+  (* the union of two types is at least as ghost as each of them *)
+  let rec lemma type_union_upper (p1 p2 p3 : pi)
+    requires { type_union p1 p2 = Some p3 }
+    ensures  { le_pi p1 p3 /\ le_pi p2 p3 }
+    variant  { p1 }
+  = match p1, p2, p3 with
+    | Cons (_, _) r1, Cons (_, _) r2, Cons (_, _) r3 -> type_union_upper r1 r2 r3
+    | _ -> ()
+    end
+
+  (* Lemma 3.2.8 (Preservation) *)
+  lemma preservation:
+    forall e r. eval e r ->
+        forall p. typing empty_ctx e p ->
+          exists q. typing_result r q /\ le_pi q p
+          
+end
+
+(* Theorem 3.2.9 (1): type soundness *)
+module TypeSoundness
+
+  use Types
+  use Typing
+  use Result
+  use Semantics
+  use Preservation
+
+  (* a closed well-typed expression never evaluates to err *)
+  lemma type_soundness: 
+    forall e p. 
+      typing empty_ctx e p -> not (eval e RErr)
+
+end
+
+(* Logic: terms and formulas of the specification language *)
+module Logic
+
+  use int.Int
+  use list.List
+  use Notation
+  use Syntax
+  use Types
+  
+  (* integer operators *)
+  type binop = Add | Sub | Mul
+  
+  (* terms *)
+  type term =
+    | TmVal value
+    | TmVar ident
+    | TmBin binop term term
+    
+  (* integer comparisons *)
+  type cmp = Lt | Le
+  
+  (* formulas *)
+  type fmla =
+    | FTrue
+    | FFalse
+    | FEq     term term            
+    | FCmp    cmp term term        
+    | FAnd    fmla fmla
+    | FImp    fmla fmla
+    | FNot    fmla
+    | FLet    (list (ident, term)) fmla 
+    | FForall ident ty fmla       
+    
+  (* an atom of KidML seen as a term *)
+  function term_of_atom (a : atom) : term =
+    match a with
+    | AVar x -> TmVar x
+    | AVal v -> TmVal v
+    end  
+    
+  (* forall x : int. x < x + 1 *)
+  constant ex_succ : fmla =
+    FForall "x" (TApp TInt Nil)
+      (FCmp Lt (TmVar "x") (TmBin Add (TmVar "x") (TmVal (VConst (CInt 1)))))
+      
+  (* let r1 = y, r2 = x in r2 < r1  (wp of (y, x) for the postcondition ([r1; r2], r2 < r1)) *)
+  constant ex_swap : fmla =
+    FLet (Cons ("r1", TmVar "y") (Cons ("r2", TmVar "x") Nil))
+      (FCmp Lt (TmVar "r2") (TmVar "r1"))
+
+  goal term_of_atom_var: term_of_atom (AVar "x") = TmVar "x"
+
+end

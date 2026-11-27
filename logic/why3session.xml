@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE why3session PUBLIC "-//Why3//proof session v5//EN"
+"https://www.why3.org/why3session.dtd">
+<why3session shape_version="6">
+<prover id="0" name="Alt-Ergo" version="2.4.3" timelimit="1" steplimit="0" memlimit="1000"/>
+<file format="whyml">
+<path name=".."/><path name="logic.mlw"/>
+<theory name="Subst">
+ <goal name="subst_var">
+ </goal>
+ <goal name="subst_shadow">
+ </goal>
+</theory>
+<theory name="SubstLemma">
+ <goal name="subst_atom_typing">
+ </goal>
+ <goal name="subst_atoms_typing&#39;vc" expl="VC for subst_atoms_typing">
+ </goal>
+ <goal name="le_pi_ghost&#39;vc" expl="VC for le_pi_ghost">
+ </goal>
+ <goal name="le_pi_ghostification&#39;vc" expl="VC for le_pi_ghostification">
+ </goal>
+ <goal name="le_type_union&#39;vc" expl="VC for le_type_union">
+ </goal>
+ <goal name="le_mask_refl&#39;vc" expl="VC for le_mask_refl">
+ </goal>
+ <goal name="le_mask_trans&#39;vc" expl="VC for le_mask_trans">
+ </goal>
+ <goal name="binders_types_length&#39;vc" expl="VC for binders_types_length">
+ </goal>
+ <goal name="extend_shadow&#39;vc" expl="VC for extend_shadow">
+ </goal>
+ <goal name="extend_commute&#39;vc" expl="VC for extend_commute">
+ </goal>
+ <goal name="subst_typing&#39;vc" expl="VC for subst_typing">
+ </goal>
+ <goal name="subst_all_typing&#39;vc" expl="VC for subst_all_typing">
+ </goal>
+</theory>
+<theory name="Progress">
+ <goal name="typing_atom_empty">
+ </goal>
+ <goal name="typing_atoms_empty&#39;vc" expl="VC for typing_atoms_empty">
+ </goal>
+ <goal name="typing_bool_empty">
+ </goal>
+ <goal name="typing_progress">
+ </goal>
+</theory>
+<theory name="EvalNotDiv">
+ <goal name="eval_not_div">
+ </goal>
+</theory>
+<theory name="Preservation">
+ <goal name="type_union_upper&#39;vc" expl="VC for type_union_upper">
+ </goal>
+ <goal name="preservation">
+ </goal>
+</theory>
+<theory name="TypeSoundness">
+ <goal name="type_soundness">
+ </goal>
+</theory>
+<theory name="Logic" proved="true">
+ <goal name="term_of_atom_var" proved="true">
+ <proof prover="0"><result status="valid" time="0.014074" steps="33"/></proof>
+ </goal>
+</theory>
+</file>
+</why3session>
