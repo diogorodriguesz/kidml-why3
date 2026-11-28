@@ -647,6 +647,8 @@ module Logic
 
   use int.Int
   use list.List
+  use map.Map
+  use map.Const
   use Notation
   use Syntax
   use Types
@@ -681,7 +683,9 @@ module Logic
     | AVar x -> TmVar x
     | AVal v -> TmVal v
     end  
-    
+   
+   
+   
   (* forall x : int. x < x + 1 *)
   constant ex_succ : fmla =
     FForall "x" (TApp TInt Nil)
@@ -693,5 +697,85 @@ module Logic
       (FCmp Lt (TmVar "r2") (TmVar "r1"))
 
   goal term_of_atom_var: term_of_atom (AVar "x") = TmVar "x"
+  
+  
+  
+  (* environment: the value of every variable *)
+  type env = map ident value
+  
+  (* environment where every variable has the junk value () *)
+  constant empty_env : env = const (VConst CUnit)
+  
+  (* integer operators on values *)
+  function interp_binop (op : binop) (v1 v2 : value) : value =
+    match v1, v2 with
+    | VConst (CInt n1), VConst (CInt n2) ->
+        match op with
+        | Add -> VConst (CInt (n1 + n2))
+        | Sub -> VConst (CInt (n1 - n2))
+        | Mul -> VConst (CInt (n1 * n2))
+        end
+    | _ -> VConst CUnit
+    end
 
+  (* value of a term in an environment *)
+  function interp_term (env : env) (t : term) : value =
+    match t with
+    | TmVal v        -> v
+    | TmVar x        -> env[x]
+    | TmBin op t1 t2 -> interp_binop op (interp_term env t1) (interp_term env t2)
+    end
+    
+
+
+  (* x + 1 = 42 when x = 41 *)
+  goal interp_add:
+    interp_term empty_env["x" <- VConst (CInt 41)] 
+      (TmBin Add (TmVar "x") (TmVal (VConst (CInt 1))))
+    = VConst (CInt 42)
+
+  (* true + 1 is junk *)
+  goal interp_junk:
+    interp_term empty_env 
+      (TmBin Add (TmVal (VConst (CBool true))) (TmVal (VConst (CInt 1))))
+    = VConst CUnit
+    
+    
+    
+  (* FLet, step 1: the values of the bound terms *)
+  function interp_binds (env : env) (bs : list (ident, term)) : list (ident, value) =
+    match bs with
+    | Nil           -> Nil
+    | Cons (x, t) r -> Cons (x, interp_term env t) (interp_binds env r)
+    end      
+    
+  (* FLet, step 2: add the bindings to the environment (the first binding of a name wins) *)
+  function extend_env (env : env) (vs : list (ident, value)) : env =
+    match vs with
+    | Nil           -> env
+    | Cons (x, v) r -> (extend_env env r)[x <- v]
+    end     
+    
+  (* now the let case will be something like this:
+      | FLet bs f -> interp_fmla (extend_env env (interp_binds env bs)) f *)
+
+
+
+  (* x = 1, y = 2 *)
+  constant env_xy : env =
+    empty_env["x" <- VConst (CInt 1)]["y" <- VConst (CInt 2)]
+    
+  (* let x = y, y = x: simultaneous, so the values are swapped *)
+  goal binds_swap:
+    let env' = extend_env env_xy
+                 (interp_binds env_xy
+                    (Cons ("x", TmVar "y") (Cons ("y", TmVar "x") Nil))) in
+    env'["x"] = VConst (CInt 2) /\ env'["y"] = VConst (CInt 1)
+
+  (* let r = 1, r = 2: the first binding wins *)
+  goal binds_first_wins:
+    let env' = extend_env empty_env
+                 (Cons ("r", VConst (CInt 1)) (Cons ("r", VConst (CInt 2)) Nil)) in
+    env'["r"] = VConst (CInt 1)
+    
 end
